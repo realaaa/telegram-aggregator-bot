@@ -52,7 +52,7 @@ class Topic:
 
 class Summarizer:
     def __init__(self, api_key: str, model: str = "claude-sonnet-4-5-20250929") -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
 
     def _build_user_prompt(self, messages: list[dict]) -> str:
@@ -87,12 +87,15 @@ class Summarizer:
             len(user_prompt),
         )
 
-        response = self._client.messages.create(
+        response = await self._client.messages.create(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
+
+        if response.stop_reason != "end_turn":
+            logger.warning("Claude response truncated (stop_reason=%s)", response.stop_reason)
 
         raw = response.content[0].text.strip()
         # Strip markdown fences if the model includes them
