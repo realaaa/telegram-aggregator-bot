@@ -21,7 +21,7 @@
 ### 2.2 Message Collection
 
 - A Telethon MTProto user client runs in the background and reads messages from all subscribed public channels.
-- Messages from the last 24 hours (fixed window) are collected when a summary is requested.
+- Messages from the last 24 hours (fixed window) are collected when a summary is requested, and automatically each morning for the scheduled daily digest.
 - Collected messages (text, metadata, media references) are stored in SQLite for processing.
 
 ### 2.3 Summarisation Pipeline
@@ -34,7 +34,7 @@
 
 ### 2.4 Fact-Checking
 
-- Key claims identified during summarisation are verified via Tavily API web search.
+- Key claims identified during summarisation are verified by Claude using its built-in web search tool.
 - Fact-check results are appended inline to the relevant topic summary (e.g. "✓ Verified" / "⚠ Disputed" / "? Unverified").
 
 ### 2.5 Media Handling
@@ -95,7 +95,7 @@ Hybrid architecture combining two Telegram client libraries:
          └─────────┬─────────┘
                    │
          ┌─────────▼─────────┐
-         │   Fact Checker    │  ← Tavily API
+         │   Fact Checker    │  ← Claude web search
          └─────────┬─────────┘
                    │
          ┌─────────▼─────────┐
@@ -111,7 +111,7 @@ Hybrid architecture combining two Telegram client libraries:
 3. Channel Reader fetches messages from the last 24 hours across all subscribed channels via Telethon.
 4. Messages are stored/cached in Message Store (SQLite).
 5. Summarisation Engine (Claude API) clusters, summarises, cross-links, and categorises the messages.
-6. Fact Checker (Tavily API) verifies key claims extracted during summarisation.
+6. Fact Checker (Claude + web search) verifies key claims extracted during summarisation.
 7. Report Formatter assembles the final Telegram message(s).
 8. Bot Interface delivers the report to the user.
 
@@ -125,7 +125,7 @@ Hybrid architecture combining two Telegram client libraries:
 | Bot framework | aiogram 3.x |
 | Channel reader | Telethon |
 | AI / summarisation | Anthropic SDK (Claude API) |
-| Fact-checking | Tavily API |
+| Fact-checking | Claude built-in web search tool |
 | Database | SQLite (via aiosqlite) |
 | Config | Environment variables (.env) |
 
@@ -137,6 +137,7 @@ Hybrid architecture combining two Telegram client libraries:
 |---|---|
 | `/start` | Welcome message and usage instructions |
 | `/summary` | Generate and deliver a summary of the last 24 hours |
+| *(scheduled)* | Daily digest sent to the owner at `DIGEST_TIME` (`DIGEST_TIMEZONE`) |
 | `/add_channel <username>` | Subscribe to a public channel |
 | `/remove_channel <username>` | Unsubscribe from a channel |
 | `/list_channels` | Show all subscribed channels |
@@ -147,7 +148,7 @@ Hybrid architecture combining two Telegram client libraries:
 ## 6. Non-Functional Requirements
 
 - **Single-user deployment** — no auth/multi-tenancy needed.
-- **Local execution** — runs on the user's machine; no cloud infra required.
+- **Self-hosted** — runs locally or in a Docker container on the user's VPS; no inbound ports required (long polling).
 - **Environment-based config** — all secrets (API keys, bot token, Telethon session) via `.env` file.
 - **Resilience** — graceful error handling when APIs are unavailable; partial summaries over no summary.
 - **Logging** — structured logging for debugging and monitoring.
@@ -157,7 +158,6 @@ Hybrid architecture combining two Telegram client libraries:
 ## 7. Out of Scope (v1)
 
 - Multi-user support / authentication
-- Scheduled / automatic digests
 - Keyword-based alerts
 - Priority ranking of topics
 - Real-time push notifications

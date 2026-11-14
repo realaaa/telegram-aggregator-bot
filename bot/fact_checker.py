@@ -2,78 +2,146 @@ from __future__ import annotations
 
 import logging
 
-from tavily import TavilyClient
+import anthropic
 
-from bot.summarizer import Topic
+from bot.summarizer import FALLBACK_BETA, FactCheck, Topic
 
 logger = logging.getLogger(__name__)
 
-VERDICT_VERIFIED = "\u2713 Verified"
-VERDICT_DISPUTED = "\u26a0 Disputed"
-VERDICT_UNVERIFIED = "? Unverified"
+VERDICTS = ("verified", "disputed", "unverified")
+
+# Hard cap on web searches per digest (billed per search)
+MAX_SEARCHES = 25
+# Max server-side continuations (pause_turn) + reminder turns before giving up
+MAX_TURNS = 6
+
+SYSTEM_PROMPT = """\
+You are a fact-checker. You receive numbered factual claims taken from today's \
+Telegram news channels. Check each claim against current web sources with the \
+web_search tool; do not rely on your training knowledge, since these are recent events. \
+Group related claims into shared searches where you can.
+
+Verdicts:
+- verified: reputable independent sources confirm the claim.
+- disputed: reputable sources contradict it, or it has been debunked or corrected.
+- unverified: you could not find reliable confirmation either way.
+
+When you are done, call report_fact_checks exactly once with a verdict for every claim id. \
+For each, add a one-sentence note on what the sources say and the URL of the best source \
+(empty string if none)."""
+
+REPORT_TOOL = {
+    "name": "report_fact_checks",
+    "description": "Submit the final verdict for every claim. Call once, after searching.",
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim_id": {"type": "integer"},
+                        "verdict": {"type": "string", "enum": list(VERDICTS)},
+                        "note": {"type": "string"},
+                        "source_url": {"type": "string"},
+                    },
+                    "required": ["claim_id", "verdict", "note", "source_url"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["results"],
+        "additionalProperties": False,
+    },
+}
 
 
 class FactChecker:
-    def __init__(self, api_key: str) -> None:
-        self._client = TavilyClient(api_key=api_key)
-
-    def _assess_results(self, claim: str, results: list[dict]) -> str:
-        """Simple heuristic: if we get relevant results, mark verified; otherwise unverified."""
-        if not results:
-            return VERDICT_UNVERIFIED
-
-        # Check if any result's content mentions keywords that suggest the claim is disputed
-        dispute_keywords = [
-            "false", "misleading", "debunked", "hoax", "incorrect",
-            "not true", "fabricated", "misinformation", "disinformation",
-        ]
-        support_keywords = [
-            "confirmed", "verified", "true", "correct", "according to",
-            "official", "announced", "reported",
-        ]
-
-        dispute_score = 0
-        support_score = 0
-
-        for r in results:
-            content = (r.get("content") or "").lower()
-            for kw in dispute_keywords:
-                if kw in content:
-                    dispute_score += 1
-            for kw in support_keywords:
-                if kw in content:
-                    support_score += 1
-
-        if dispute_score > support_score and dispute_score >= 2:
-            return VERDICT_DISPUTED
-        if support_score > 0:
-            return VERDICT_VERIFIED
-        return VERDICT_UNVERIFIED
+    def __init__(self, client: anthropic.AsyncAnthropic, model: str) -> None:
+        self._client = client
+        self._model = model
 
     async def check_claims(self, topics: list[Topic]) -> list[Topic]:
-        """Fact-check claims in each topic and annotate them with verdicts."""
-        for topic in topics:
-            if not topic.claims:
-                topic.fact_checks = {}
-                continue
+        """Fact-check all claims across topics in one Claude + web search session."""
+        claims: list[tuple[Topic, str]] = [
+            (topic, claim) for topic in topics for claim in topic.claims
+        ]
+        if not claims:
+            return topics
 
-            verdicts: dict[str, str] = {}
-            for claim in topic.claims:
-                try:
-                    response = self._client.search(
-                        query=claim,
-                        search_depth="basic",
-                        max_results=5,
-                    )
-                    results = response.get("results", [])
-                    verdicts[claim] = self._assess_results(claim, results)
-                except Exception:
-                    logger.exception("Tavily search failed for claim: %s", claim)
-                    verdicts[claim] = VERDICT_UNVERIFIED
+        listing = "\n".join(
+            f"{i}. [{topic.title}] {claim}" for i, (topic, claim) in enumerate(claims, 1)
+        )
+        messages: list[dict] = [{"role": "user", "content": f"Claims to check:\n\n{listing}"}]
+        tools = [
+            {
+                "type": "web_search_20260209",
+                "name": "web_search",
+                "max_uses": min(MAX_SEARCHES, 2 * len(claims)),
+            },
+            REPORT_TOOL,
+        ]
 
-            topic.fact_checks = verdicts
+        results: list[dict] | None = None
+        for _ in range(MAX_TURNS):
+            response = await self._client.beta.messages.create(
+                model=self._model,
+                max_tokens=16000,
+                system=SYSTEM_PROMPT,
+                tools=tools,
+                messages=messages,
+                output_config={"effort": "medium"},
+                betas=[FALLBACK_BETA],
+                fallbacks="default",
+            )
             logger.info(
-                "Topic '%s': %d claims checked", topic.title, len(verdicts)
+                "Fact-check turn: stop=%s in=%d out=%d",
+                response.stop_reason,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
             )
 
+            report = next(
+                (
+                    b for b in response.content
+                    if b.type == "tool_use" and b.name == "report_fact_checks"
+                ),
+                None,
+            )
+            if report is not None:
+                results = report.input["results"]
+                break
+
+            if response.stop_reason == "refusal":
+                logger.warning("Fact-check declined: %s", response.stop_details)
+                break
+
+            # Keep the full assistant turn (incl. search results) in history
+            messages.append({"role": "assistant", "content": response.content})
+            if response.stop_reason == "pause_turn":
+                continue  # server-side search loop paused: resend to resume
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Please submit your verdicts now with report_fact_checks.",
+                }
+            )
+
+        by_id = {r["claim_id"]: r for r in results or []}
+        for topic in topics:
+            topic.fact_checks = []
+        for i, (topic, claim) in enumerate(claims, 1):
+            r = by_id.get(i)
+            topic.fact_checks.append(
+                FactCheck(
+                    claim=claim,
+                    verdict=r["verdict"] if r else "unverified",
+                    note=r["note"] if r else "",
+                    source_url=r["source_url"] if r else "",
+                )
+            )
+
+        logger.info("Fact-checked %d/%d claims", len(by_id), len(claims))
         return topics

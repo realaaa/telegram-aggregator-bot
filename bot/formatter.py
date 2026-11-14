@@ -1,91 +1,135 @@
 from __future__ import annotations
 
+from datetime import datetime
+from html import escape
+
 from bot.summarizer import Topic
 
 TELEGRAM_MSG_LIMIT = 4096
+SECTION_SEPARATOR = "\n\n"
+MAX_LINKS_PER_CHANNEL = 5
+
+VERDICT_LABELS = {
+    "verified": "✅ Verified",
+    "disputed": "⚠️ Disputed",
+    "unverified": "❔ Unverified",
+}
 
 
 def _msg_link(channel: str, msg_id: int | None = None) -> str:
     """Build a t.me link for a channel (or specific message)."""
     base = f"https://t.me/{channel}"
-    if msg_id:
-        return f"{base}/{msg_id}"
-    return base
+    return f"{base}/{msg_id}" if msg_id else base
 
 
-def format_report(topics: list[Topic]) -> list[str]:
-    """Format topics into one or more Telegram HTML messages."""
+def _a(url: str, text: str) -> str:
+    return f'<a href="{escape(url, quote=True)}">{escape(text)}</a>'
+
+
+def _format_sources(topic: Topic) -> str | None:
+    by_channel: dict[str, list[int]] = {}
+    for channel, msg_id in topic.sources:
+        by_channel.setdefault(channel, []).append(msg_id)
+    if not by_channel:
+        return None
+
+    parts = []
+    for channel, ids in by_channel.items():
+        ids = sorted(set(ids))[:MAX_LINKS_PER_CHANNEL]
+        if len(ids) == 1:
+            parts.append(_a(_msg_link(channel, ids[0]), f"@{channel}"))
+        else:
+            posts = " ".join(_a(_msg_link(channel, i), f"[{n}]") for n, i in enumerate(ids, 1))
+            parts.append(f"{_a(_msg_link(channel), f'@{channel}')} {posts}")
+    return "Sources: " + ", ".join(parts)
+
+
+def _format_topic(topic: Topic) -> str:
+    lines = [
+        f"<b>{topic.id}. {escape(topic.title)}</b>  <i>[{escape(topic.category)}]</i>",
+        escape(topic.summary),
+    ]
+
+    if topic.fact_checks:
+        lines.append("<b>Fact-check:</b>")
+        for fc in topic.fact_checks:
+            line = f"{VERDICT_LABELS.get(fc.verdict, fc.verdict)} — {escape(fc.claim)}"
+            if fc.note:
+                line += f"\n    <i>{escape(fc.note)}</i>"
+            if fc.source_url.startswith(("http://", "https://")):
+                line += f" {_a(fc.source_url, '(source)')}"
+            lines.append(line)
+
+    sources = _format_sources(topic)
+    if sources:
+        lines.append(sources)
+
+    if topic.related_topics:
+        lines.append("Related: " + ", ".join(f"#{tid}" for tid in topic.related_topics))
+
+    return "\n".join(lines)
+
+
+def _split_long_line(line: str, limit: int) -> list[str]:
+    """Split a single over-long line at whitespace (last resort: hard cut)."""
+    chunks: list[str] = []
+    while len(line) > limit:
+        cut = line.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        chunks.append(line[:cut])
+        line = line[cut:].lstrip()
+    if line:
+        chunks.append(line)
+    return chunks
+
+
+def _split_section(section: str, limit: int) -> list[str]:
+    """Split one section into <= limit chunks on line boundaries (keeps HTML tags intact)."""
+    if len(section) <= limit:
+        return [section]
+    chunks: list[str] = []
+    current = ""
+    for line in section.split("\n"):
+        for piece in _split_long_line(line, limit):
+            candidate = f"{current}\n{piece}" if current else piece
+            if len(candidate) > limit:
+                chunks.append(current)
+                current = piece
+            else:
+                current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def format_report(
+    topics: list[Topic], hours: int, now: datetime | None = None,
+) -> list[str]:
+    """Format topics into one or more Telegram HTML messages (each <= 4096 chars)."""
     if not topics:
-        return ["No updates found in the last 24 hours."]
+        return [f"No updates found in the last {hours} hours."]
 
-    sections: list[str] = []
+    date_str = (now or datetime.now()).strftime("%a %d %b %Y")
+    n = len(topics)
+    header = (
+        f"<b>📰 Daily Digest — {date_str}</b>\n"
+        f"<i>{n} topic{'s' if n != 1 else ''}, last {hours}h</i>"
+    )
 
+    pieces = [header]
     for topic in topics:
-        lines: list[str] = []
+        pieces.extend(_split_section(_format_topic(topic), TELEGRAM_MSG_LIMIT))
 
-        # Header: title + category
-        lines.append(
-            f"<b>{topic.id}. {_escape(topic.title)}</b>  "
-            f"<i>[{_escape(topic.category)}]</i>"
-        )
-
-        # Summary
-        lines.append(_escape(topic.summary))
-
-        # Fact-checks
-        if topic.fact_checks:
-            fc_lines = []
-            for claim, verdict in topic.fact_checks.items():
-                fc_lines.append(f"  {verdict} — {_escape(claim)}")
-            if fc_lines:
-                lines.append("<b>Fact-check:</b>")
-                lines.extend(fc_lines)
-
-        # Source channels
-        channel_links = [
-            f'<a href="{_msg_link(ch)}">@{_escape(ch)}</a>'
-            for ch in topic.channels
-        ]
-        if channel_links:
-            lines.append(f"Sources: {', '.join(channel_links)}")
-
-        # Related topics
-        if topic.related_topics:
-            refs = [f"#{tid}" for tid in topic.related_topics]
-            lines.append(f"Related: {', '.join(refs)}")
-
-        sections.append("\n".join(lines))
-
-    # Join sections and split into messages if needed
-    full_text = "\n\n---\n\n".join(sections)
-    header = "<b>Daily Digest</b>\n\n"
-
-    if len(header + full_text) <= TELEGRAM_MSG_LIMIT:
-        return [header + full_text]
-
-    # Split into multiple messages
     messages: list[str] = []
-    current = header
-    for section in sections:
-        separator = "\n\n---\n\n"
-        candidate = current + separator + section if current != header else current + section
+    current = ""
+    for piece in pieces:
+        candidate = f"{current}{SECTION_SEPARATOR}{piece}" if current else piece
         if len(candidate) > TELEGRAM_MSG_LIMIT:
-            if current != header:
-                messages.append(current)
-            current = section
+            messages.append(current)
+            current = piece
         else:
             current = candidate
-
     if current:
         messages.append(current)
-
     return messages
-
-
-def _escape(text: str) -> str:
-    """Escape HTML special chars for Telegram HTML parse mode."""
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )

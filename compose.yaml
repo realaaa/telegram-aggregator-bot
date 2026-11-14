@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    image: telegram-aggregator-bot
+    container_name: telegram-aggregator-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

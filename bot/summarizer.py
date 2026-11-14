@@ -2,40 +2,72 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anthropic
 
 logger = logging.getLogger(__name__)
 
+# Server-side refusal fallback: if Sonnet 5.5's safety classifiers decline a
+# request, the API retries it on Anthropic's recommended fallback model.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
 SYSTEM_PROMPT = """\
-You are a news analyst that processes Telegram channel messages and produces a structured digest.
+You are a news analyst. You turn a day's worth of Telegram channel posts into a \
+structured digest for one busy reader.
 
-Given a list of messages from various Telegram channels, you must:
-1. Cluster messages into distinct topics (group messages about the same event/story together).
-2. For each topic, write a concise summary (2-4 sentences).
-3. Assign a category tag to each topic (e.g. Technology, Politics, Finance, Science, Sports, Entertainment, World, Other).
-4. Identify which channels covered each topic.
-5. Cross-link related topics by referencing their topic numbers.
-6. Extract 0-3 key factual claims per topic that should be fact-checked. Only extract concrete, verifiable claims — not opinions or vague statements.
+Each input post starts with a reference like [ref=channel/123], followed by its \
+UTC timestamp, the channel and the text. Media is shown as [photo], [video: title] etc.
 
-Return ONLY valid JSON matching this schema (no markdown fences):
-{
-  "topics": [
-    {
-      "id": 1,
-      "title": "Short topic title",
-      "category": "Category",
-      "summary": "Concise summary of the topic.",
-      "channels": ["channel1", "channel2"],
-      "related_topics": [2],
-      "claims": ["Specific factual claim to verify"]
-    }
-  ]
+Your job:
+1. Cluster the posts into distinct topics: posts about the same event or story belong together.
+2. Write a concise summary per topic (2-4 sentences) that merges what all the sources say.
+3. Give each topic one category: Technology, Politics, Finance, Science, Sports, \
+Entertainment, World, or Other.
+4. List the refs of the posts each topic is based on (exactly as written in the input).
+5. Cross-link related topics by their topic ids.
+6. Extract 0-3 concrete, independently verifiable factual claims per topic \
+(numbers, dates, named events, attributed statements). Skip opinions, predictions and vague statements.
+
+Order topics by importance to a general reader, most important first; number ids from 1. \
+Skip pure ads, giveaways and channel housekeeping posts. \
+If nothing is worth summarising, return an empty topics list."""
+
+TOPICS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "topics": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "category": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "sources": {"type": "array", "items": {"type": "string"}},
+                    "related_topics": {"type": "array", "items": {"type": "integer"}},
+                    "claims": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "id", "title", "category", "summary",
+                    "sources", "related_topics", "claims",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["topics"],
+    "additionalProperties": False,
 }
 
-If there are no messages or nothing meaningful to summarise, return: {"topics": []}
-"""
+
+@dataclass
+class FactCheck:
+    claim: str
+    verdict: str  # "verified" | "disputed" | "unverified"
+    note: str = ""
+    source_url: str = ""
 
 
 @dataclass
@@ -44,37 +76,46 @@ class Topic:
     title: str
     category: str
     summary: str
-    channels: list[str]
+    sources: list[tuple[str, int]]  # (channel_username, telegram_msg_id)
     related_topics: list[int]
     claims: list[str]
-    fact_checks: dict[str, str] | None = None  # claim -> verdict, filled later
+    fact_checks: list[FactCheck] = field(default_factory=list)
+
+    @property
+    def channels(self) -> list[str]:
+        return list(dict.fromkeys(ch for ch, _ in self.sources))
+
+
+class SummarizationError(RuntimeError):
+    pass
+
+
+def _ref(channel: str, msg_id: int) -> str:
+    return f"{channel}/{msg_id}"
 
 
 class Summarizer:
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-5-20250929") -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+    def __init__(self, client: anthropic.AsyncAnthropic, model: str) -> None:
+        self._client = client
         self._model = model
 
     def _build_user_prompt(self, messages: list[dict]) -> str:
         lines: list[str] = []
         for msg in messages:
             channel = msg["channel_username"]
-            date = msg["date"]
-            text = msg.get("text") or ""
-            media = msg.get("media_type")
-            caption = msg.get("media_caption")
-
-            parts = [f"[{date}] @{channel}:"]
-            if text:
-                parts.append(text[:1000])  # truncate very long messages
-            if media:
-                detail = f"[{media}]"
-                if caption:
-                    detail = f"[{media}: {caption}]"
-                parts.append(detail)
+            parts = [
+                f"[ref={_ref(channel, msg['telegram_msg_id'])}]",
+                f"[{msg['date']}] @{channel}:",
+            ]
+            if msg.get("text"):
+                parts.append(msg["text"])
+            if msg.get("media_type"):
+                caption = msg.get("media_caption")
+                parts.append(
+                    f"[{msg['media_type']}: {caption}]" if caption else f"[{msg['media_type']}]"
+                )
             lines.append(" ".join(parts))
-
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     async def summarize(self, messages: list[dict]) -> list[Topic]:
         if not messages:
@@ -82,45 +123,63 @@ class Summarizer:
 
         user_prompt = self._build_user_prompt(messages)
         logger.info(
-            "Sending %d messages (%d chars) to Claude for summarisation",
-            len(messages),
-            len(user_prompt),
+            "Sending %d messages (%d chars) to %s for summarisation",
+            len(messages), len(user_prompt), self._model,
         )
 
-        response = await self._client.messages.create(
+        async with self._client.beta.messages.stream(
             model=self._model,
-            max_tokens=8192,
+            max_tokens=64000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
+            output_config={
+                "effort": "medium",
+                "format": {"type": "json_schema", "schema": TOPICS_SCHEMA},
+            },
+            betas=[FALLBACK_BETA],
+            fallbacks="default",
+        ) as stream:
+            response = await stream.get_final_message()
+
+        logger.info(
+            "Summarisation done: model=%s stop=%s in=%d out=%d",
+            response.model, response.stop_reason,
+            response.usage.input_tokens, response.usage.output_tokens,
         )
 
-        if response.stop_reason != "end_turn":
-            logger.warning("Claude response truncated (stop_reason=%s)", response.stop_reason)
+        if response.stop_reason == "refusal":
+            raise SummarizationError(f"Claude declined the request: {response.stop_details}")
+        if response.stop_reason == "max_tokens":
+            raise SummarizationError("Claude's output hit max_tokens before finishing")
 
-        raw = response.content[0].text.strip()
-        # Strip markdown fences if the model includes them
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1]
-            if raw.endswith("```"):
-                raw = raw[: raw.rfind("```")]
-
+        text = next((b.text for b in response.content if b.type == "text"), "")
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.error("Failed to parse Claude response as JSON: %s", raw[:500])
-            return []
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise SummarizationError("Claude returned invalid JSON") from exc
+
+        known_refs = {
+            _ref(m["channel_username"], m["telegram_msg_id"]) for m in messages
+        }
 
         topics: list[Topic] = []
-        for t in data.get("topics", []):
+        for t in data["topics"]:
+            sources: list[tuple[str, int]] = []
+            for ref in t["sources"]:
+                if ref not in known_refs:
+                    logger.debug("Dropping unknown source ref %r", ref)
+                    continue
+                channel, msg_id = ref.rsplit("/", 1)
+                sources.append((channel, int(msg_id)))
             topics.append(
                 Topic(
                     id=t["id"],
                     title=t["title"],
-                    category=t.get("category", "Other"),
+                    category=t["category"],
                     summary=t["summary"],
-                    channels=t.get("channels", []),
-                    related_topics=t.get("related_topics", []),
-                    claims=t.get("claims", []),
+                    sources=sources,
+                    related_topics=t["related_topics"],
+                    claims=t["claims"],
                 )
             )
 

@@ -1,0 +1,13 @@
+.env
+.env.*
+.venv/
+data/
+data.db
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+.git/
+.claude/
+.DS_Store
+CLAUDE.md
