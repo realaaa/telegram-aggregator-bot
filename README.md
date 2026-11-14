@@ -8,7 +8,9 @@ A personal Telegram bot that collects messages from public Telegram channels, cl
 2. Every morning at `DIGEST_TIME` (or whenever you send `/summary`), the bot fetches the last 24 hours of messages from all subscribed channels.
 3. Messages are sent to Claude (Sonnet 5.5), which clusters them into topics, categorises them, and extracts key claims — returned as schema-validated JSON.
 4. Claude checks the claims against current web sources using its built-in web search tool.
-5. A formatted digest, with links to the original posts and fact-check sources, is delivered to you in Telegram.
+5. The digest — with links to the original posts and fact-check sources — is published as a [Telegra.ph](https://telegra.ph) page, and the bot sends you just the link (opens with Instant View in Telegram). If publishing fails, the full digest is sent as Telegram messages instead.
+
+> **Privacy:** Telegra.ph pages are public to anyone who has the link (they are not listed or searchable by default). The bot creates a Telegraph account on first use and stores its token in `DATA_DIR/telegraph.json`.
 
 ## Prerequisites
 
@@ -137,7 +139,7 @@ Update to a new version:
 git pull && docker compose up -d --build
 ```
 
-Back up `data/` (contains your Telegram session — treat as a secret).
+Back up `data/` (contains your Telegram session and Telegraph token — treat as secrets).
 
 ## Usage
 
@@ -163,6 +165,7 @@ telegram-aggregator-bot/
 │   ├── fact_checker.py    # Claude + web search — claim verification
 │   ├── formatter.py       # Report formatting for Telegram HTML
 │   ├── digest.py          # Digest pipeline + daily scheduler
+│   ├── telegraph.py       # Telegra.ph publishing
 │   └── handlers.py        # aiogram command handlers
 ├── Dockerfile
 ├── compose.yaml

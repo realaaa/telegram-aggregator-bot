@@ -17,6 +17,7 @@ from bot.digest import DigestService, run_daily_scheduler
 from bot.fact_checker import FactChecker
 from bot.handlers import inject, router
 from bot.summarizer import Summarizer
+from bot.telegraph import TelegraphClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,12 +48,14 @@ async def main() -> None:
 
     # AI components (share one Anthropic client)
     claude = anthropic.AsyncAnthropic(api_key=config.anthropic_api_key)
+    telegraph = TelegraphClient(config.data_dir)
     digest = DigestService(
         config=config,
         db=db,
         reader=reader,
         summarizer=Summarizer(claude, model=config.claude_model),
         fact_checker=FactChecker(claude, model=config.claude_model),
+        telegraph=telegraph,
     )
 
     inject(config=config, db=db, reader=reader, digest=digest)
@@ -73,6 +76,7 @@ async def main() -> None:
             await scheduler
         await reader.stop()
         await claude.close()
+        await telegraph.close()
         await db.close()
         await bot.session.close()
         logger.info("Shutdown complete")

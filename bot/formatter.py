@@ -8,6 +8,7 @@ from bot.summarizer import Topic
 TELEGRAM_MSG_LIMIT = 4096
 SECTION_SEPARATOR = "\n\n"
 MAX_LINKS_PER_CHANNEL = 5
+DATE_FORMAT = "%a %d %b %Y"
 
 VERDICT_LABELS = {
     "verified": "✅ Verified",
@@ -16,10 +17,18 @@ VERDICT_LABELS = {
 }
 
 
-def _msg_link(channel: str, msg_id: int | None = None) -> str:
+def msg_link(channel: str, msg_id: int | None = None) -> str:
     """Build a t.me link for a channel (or specific message)."""
     base = f"https://t.me/{channel}"
     return f"{base}/{msg_id}" if msg_id else base
+
+
+def group_sources(topic: Topic) -> dict[str, list[int]]:
+    """Map channel -> sorted, de-duplicated message ids (capped per channel)."""
+    by_channel: dict[str, set[int]] = {}
+    for channel, msg_id in topic.sources:
+        by_channel.setdefault(channel, set()).add(msg_id)
+    return {ch: sorted(ids)[:MAX_LINKS_PER_CHANNEL] for ch, ids in by_channel.items()}
 
 
 def _a(url: str, text: str) -> str:
@@ -27,20 +36,17 @@ def _a(url: str, text: str) -> str:
 
 
 def _format_sources(topic: Topic) -> str | None:
-    by_channel: dict[str, list[int]] = {}
-    for channel, msg_id in topic.sources:
-        by_channel.setdefault(channel, []).append(msg_id)
+    by_channel = group_sources(topic)
     if not by_channel:
         return None
 
     parts = []
     for channel, ids in by_channel.items():
-        ids = sorted(set(ids))[:MAX_LINKS_PER_CHANNEL]
         if len(ids) == 1:
-            parts.append(_a(_msg_link(channel, ids[0]), f"@{channel}"))
+            parts.append(_a(msg_link(channel, ids[0]), f"@{channel}"))
         else:
-            posts = " ".join(_a(_msg_link(channel, i), f"[{n}]") for n, i in enumerate(ids, 1))
-            parts.append(f"{_a(_msg_link(channel), f'@{channel}')} {posts}")
+            posts = " ".join(_a(msg_link(channel, i), f"[{n}]") for n, i in enumerate(ids, 1))
+            parts.append(f"{_a(msg_link(channel), f'@{channel}')} {posts}")
     return "Sources: " + ", ".join(parts)
 
 
@@ -110,7 +116,7 @@ def format_report(
     if not topics:
         return [f"No updates found in the last {hours} hours."]
 
-    date_str = (now or datetime.now()).strftime("%a %d %b %Y")
+    date_str = (now or datetime.now()).strftime(DATE_FORMAT)
     n = len(topics)
     header = (
         f"<b>📰 Daily Digest — {date_str}</b>\n"

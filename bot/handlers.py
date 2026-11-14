@@ -165,7 +165,7 @@ async def cmd_summary(message: types.Message) -> None:
         await status_msg.edit_text(text)
 
     try:
-        texts = await digest.build(progress)
+        result = await digest.build(progress)
     except DigestBusyError:
         await status_msg.edit_text("A digest is already being generated — hang tight.")
         return
@@ -177,4 +177,4 @@ async def cmd_summary(message: types.Message) -> None:
         return
 
     await status_msg.delete()
-    await send_report(message.bot, message.chat.id, texts)
+    await send_report(message.bot, message.chat.id, result)

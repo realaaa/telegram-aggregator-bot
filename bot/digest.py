@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from html import escape
 
@@ -13,8 +14,9 @@ from bot.channel_reader import ChannelReader
 from bot.config import Config
 from bot.database import Database
 from bot.fact_checker import FactChecker
-from bot.formatter import format_report
+from bot.formatter import DATE_FORMAT, format_report
 from bot.summarizer import Summarizer
+from bot.telegraph import TelegraphClient, build_digest_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,12 @@ ProgressCallback = Callable[[str], Awaitable[None]]
 
 class DigestBusyError(RuntimeError):
     pass
+
+
+@dataclass
+class Digest:
+    texts: list[str]  # Telegram HTML messages to send, in order
+    preview_url: str | None = None  # show a link preview for this URL (Telegraph page)
 
 
 class DigestService:
@@ -35,12 +43,14 @@ class DigestService:
         reader: ChannelReader,
         summarizer: Summarizer,
         fact_checker: FactChecker,
+        telegraph: TelegraphClient | None = None,
     ) -> None:
         self._config = config
         self._db = db
         self._reader = reader
         self._summarizer = summarizer
         self._fact_checker = fact_checker
+        self._telegraph = telegraph
         self._lock = asyncio.Lock()
 
     @property
@@ -50,8 +60,8 @@ class DigestService:
     async def has_channels(self) -> bool:
         return bool(await self._db.list_channels())
 
-    async def build(self, progress: ProgressCallback | None = None) -> list[str]:
-        """Build the digest and return the formatted Telegram messages.
+    async def build(self, progress: ProgressCallback | None = None) -> Digest:
+        """Build the digest: a Telegraph link, or full Telegram messages as fallback.
 
         Raises DigestBusyError if another run is in progress.
         """
@@ -80,16 +90,16 @@ class DigestService:
                 if failed else None
             )
             if not messages:
-                return [
+                return Digest([
                     "\n\n".join(
                         filter(None, [f"No messages found in the last {hours} hours.", failed_note])
                     )
-                ]
+                ])
 
             await report(f"Fetched {len(messages)} messages. Summarising...")
             topics = await self._summarizer.summarize(messages)
             if not topics:
-                return ["No meaningful topics found to summarise."]
+                return Digest(["No meaningful topics found to summarise."])
 
             n_claims = sum(len(t.claims) for t in topics)
             await report(f"Found {len(topics)} topics. Fact-checking {n_claims} claims...")
@@ -99,19 +109,44 @@ class DigestService:
                 # Partial digest beats no digest
                 logger.exception("Fact-checking failed, proceeding without")
 
-            texts = format_report(
-                topics, hours, now=now.astimezone(self._config.timezone),
-            )
+            local_now = now.astimezone(self._config.timezone)
+            title = f"Daily Digest — {local_now.strftime(DATE_FORMAT)}"
+
+            if self._telegraph:
+                await report("Publishing to Telegraph...")
+                try:
+                    url = await self._telegraph.create_page(
+                        title, build_digest_nodes(topics, hours, failed),
+                    )
+                except Exception:
+                    logger.exception("Telegraph publish failed, sending as messages")
+                else:
+                    n_topics = len(topics)
+                    n_claims = sum(len(t.fact_checks) for t in topics)
+                    text = (
+                        f"<b>📰 {escape(title)}</b>\n"
+                        f"{n_topics} topic{'s' * (n_topics != 1)} · "
+                        f"{n_claims} claim{'s' * (n_claims != 1)} fact-checked\n\n"
+                        f'<a href="{escape(url, quote=True)}">Read the digest →</a>'
+                    )
+                    if failed_note:
+                        text += f"\n\n{failed_note}"
+                    return Digest([text], preview_url=url)
+
+            texts = format_report(topics, hours, now=local_now)
             if failed_note:
                 texts.append(failed_note)
-            return texts
+            return Digest(texts)
 
 
-async def send_report(bot: Bot, chat_id: int, texts: list[str]) -> None:
-    for text in texts:
-        await bot.send_message(
-            chat_id, text, link_preview_options=LinkPreviewOptions(is_disabled=True),
-        )
+async def send_report(bot: Bot, chat_id: int, digest: Digest) -> None:
+    preview = (
+        LinkPreviewOptions(url=digest.preview_url)
+        if digest.preview_url
+        else LinkPreviewOptions(is_disabled=True)
+    )
+    for text in digest.texts:
+        await bot.send_message(chat_id, text, link_preview_options=preview)
 
 
 def _seconds_until(config: Config) -> float:
@@ -142,8 +177,7 @@ async def run_daily_scheduler(bot: Bot, service: DigestService, config: Config) 
             logger.info("No channels subscribed, skipping daily digest")
             continue
         try:
-            texts = await service.build()
-            await send_report(bot, config.owner_id, texts)
+            await send_report(bot, config.owner_id, await service.build())
         except DigestBusyError:
             logger.info("Digest already running, skipping scheduled run")
         except Exception:

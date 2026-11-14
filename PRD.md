@@ -45,7 +45,7 @@
 
 ### 2.6 Report Delivery
 
-- The final report is sent as a formatted Telegram message (Markdown/HTML) via aiogram.
+- The final report is published as a Telegra.ph page and the bot sends the user a link to it (fallback: formatted Telegram HTML messages via aiogram).
 - Structure: topic-based clusters, each containing:
   - Topic title and category tag
   - Concise summary

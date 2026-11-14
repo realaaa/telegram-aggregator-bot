@@ -11,3 +11,4 @@ __pycache__/
 .claude/
 .DS_Store
 CLAUDE.md
+telegraph.json
