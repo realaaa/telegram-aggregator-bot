@@ -99,24 +99,25 @@ The bot uses long polling — it needs **no open ports, domain or reverse proxy*
 > Only one instance may run per bot token — stop the local copy before starting the server one.
 
 ```bash
-# On the server
-git clone <repo-url> telegram-aggregator-bot
+# On the server (containers live under /opt/stack)
+cd /opt/stack
+git clone github-tgbot:realaaa/telegram-aggregator-bot.git   # private repo: see "Deploy key" below
 cd telegram-aggregator-bot
 
 # Secrets: create .env (see Configuration) and lock it down
 chmod 600 .env
 
-# Data dir, owned by the container user (uid 1000)
-mkdir -p data && sudo chown 1000:1000 data && chmod 700 data
+# Data dir, owned by the container user (uid 1001 - see `ARG UID` in Dockerfile)
+mkdir -p data && chown 1001:1001 data && chmod 700 data
 ```
 
 Bring over your existing state from your Mac (optional — keeps channel list and Telegram login):
 
 ```bash
 # On your Mac
-scp data.db user_session.session <user>@web.badran.com.au:~/telegram-aggregator-bot/data/
+scp data.db user_session.session telegraph.json <user>@web.badran.com.au:/opt/stack/telegram-aggregator-bot/data/
 # On the server
-sudo chown 1000:1000 data/* && chmod 600 data/*
+chown 1001:1001 data/* && chmod 600 data/*
 ```
 
 Or log in fresh inside the container (interactive, one-off):
@@ -138,6 +139,23 @@ Update to a new version:
 ```bash
 git pull && docker compose up -d --build
 ```
+
+### Deploy key (private repo)
+
+```bash
+ssh-keygen -t ed25519 -C "vps-telegram-aggregator-bot" -f ~/.ssh/tg_bot_deploy -N ""
+cat ~/.ssh/tg_bot_deploy.pub   # add at GitHub repo -> Settings -> Deploy keys (read-only)
+cat >> ~/.ssh/config <<'CFG'
+Host github-tgbot
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/tg_bot_deploy
+    IdentitiesOnly yes
+CFG
+ssh -T github-tgbot
+```
+
+To use a different host UID, change `ARG UID` in the Dockerfile (or add `build: {context: ., args: {UID: "1234"}}` in `compose.yaml`) and `chown` `data/` to match.
 
 Back up `data/` (contains your Telegram session and Telegraph token — treat as secrets).
 

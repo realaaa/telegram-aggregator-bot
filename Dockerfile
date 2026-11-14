@@ -12,8 +12,10 @@ RUN pip install -r requirements.txt
 
 COPY bot ./bot
 
-# Run as an unprivileged user; /data holds the SQLite DB and Telethon session
-RUN useradd --uid 1000 --create-home bot \
+# Run as an unprivileged user; /data holds the SQLite DB, Telethon session and
+# Telegraph token. UID must match the owner of ./data on the host.
+ARG UID=1001
+RUN useradd --uid ${UID} --create-home bot \
     && mkdir -p /data \
     && chown bot:bot /data
 USER bot
