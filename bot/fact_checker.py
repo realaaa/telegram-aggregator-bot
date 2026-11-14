@@ -8,7 +8,7 @@ from bot.summarizer import FALLBACK_BETA, FactCheck, Topic
 
 logger = logging.getLogger(__name__)
 
-VERDICTS = ("verified", "disputed", "unverified")
+VERDICTS = ("verified", "partly_true", "disputed", "unverified")
 
 # Hard cap on web searches per digest (billed per search)
 MAX_SEARCHES = 25
@@ -22,13 +22,19 @@ web_search tool; do not rely on your training knowledge, since these are recent 
 Group related claims into shared searches where you can.
 
 Verdicts:
-- verified: reputable independent sources confirm the claim.
-- disputed: reputable sources contradict it, or it has been debunked or corrected.
+- verified: reputable independent sources confirm the claim, including its specific details \
+(numbers, dates, names, qualifiers).
+- partly_true: the core of the claim holds, but a detail is wrong, overstated, missing a \
+qualifier, or could not be confirmed.
+- disputed: reputable sources contradict the core of the claim, or it has been debunked or corrected.
 - unverified: you could not find reliable confirmation either way.
+
+Use verified only when every detail checks out; if your note would mention a caveat, \
+the verdict is partly_true.
 
 When you are done, call report_fact_checks exactly once with a verdict for every claim id. \
 For each, add a one-sentence note on what the sources say and the URL of the best source \
-(empty string if none)."""
+(empty string if none). If you did not search for a claim, say so in its note and mark it unverified."""
 
 REPORT_TOOL = {
     "name": "report_fact_checks",

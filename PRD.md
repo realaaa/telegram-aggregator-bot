@@ -35,7 +35,7 @@
 ### 2.4 Fact-Checking
 
 - Key claims identified during summarisation are verified by Claude using its built-in web search tool.
-- Fact-check results are appended inline to the relevant topic summary (e.g. "✓ Verified" / "⚠ Disputed" / "? Unverified").
+- Fact-check results are appended inline to the relevant topic summary ("✅ Verified" / "⚖️ Partly true" / "⚠️ Disputed" / "❔ Unverified").
 
 ### 2.5 Media Handling
 

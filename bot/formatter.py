@@ -12,6 +12,7 @@ DATE_FORMAT = "%a %d %b %Y"
 
 VERDICT_LABELS = {
     "verified": "✅ Verified",
+    "partly_true": "⚖️ Partly true",
     "disputed": "⚠️ Disputed",
     "unverified": "❔ Unverified",
 }

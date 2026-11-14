@@ -65,7 +65,7 @@ TOPICS_SCHEMA = {
 @dataclass
 class FactCheck:
     claim: str
-    verdict: str  # "verified" | "disputed" | "unverified"
+    verdict: str  # "verified" | "partly_true" | "disputed" | "unverified"
     note: str = ""
     source_url: str = ""
 
