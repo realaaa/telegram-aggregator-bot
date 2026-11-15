@@ -15,7 +15,6 @@ from bot.summarizer import Topic
 logger = logging.getLogger(__name__)
 
 API_URL = "https://api.telegra.ph"
-AUTHOR_NAME = "News Aggregator Bot"
 # Telegraph rejects page content above 64 KB
 MAX_CONTENT_BYTES = 64 * 1024
 
@@ -40,13 +39,19 @@ def _a(href: str, text: str) -> dict[str, Any]:
 
 
 def build_digest_nodes(
-    topics: list[Topic], hours: int, failed_channels: list[str] | None = None,
+    topics: list[Topic], period: str, overview: str | None = None,
 ) -> list[Node]:
-    """Convert topics into Telegraph content nodes."""
+    """Convert topics into Telegraph content nodes.
+
+    `period` is a phrase like "last 24 hours" or "past 7 days".
+    """
     titles = {t.id: t.title for t in topics}
     n_channels = len({ch for t in topics for ch in t.channels})
-    nodes: list[Node] = [
-        _el("p", _el("i", f"{len(topics)} topics from {n_channels} channels, last {hours} hours.")),
+    nodes: list[Node] = []
+    if overview:
+        nodes.append(_el("p", overview))
+    nodes += [
+        _el("p", _el("i", f"{len(topics)} topics from {n_channels} channels, {period}.")),
         _el("h4", "Contents"),
         _el("ol", *(_el("li", f"{t.title} [{t.category}]") for t in topics)),
     ]
@@ -88,17 +93,14 @@ def build_digest_nodes(
         if related:
             nodes.append(_el("p", _el("i", "Related: " + "; ".join(related))))
 
-    if failed_channels:
-        nodes.append(_el("hr"))
-        nodes.append(
-            _el("p", "⚠️ Could not read: " + ", ".join(f"@{c}" for c in failed_channels))
-        )
     return nodes
 
 
 class TelegraphClient:
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(self, data_dir: Path, author_name: str, author_url: str = "") -> None:
         self._token_path = data_dir / "telegraph.json"
+        self._author_name = author_name[:128]
+        self._author_url = author_url
         self._token: str | None = None
         self._session: aiohttp.ClientSession | None = None
 
@@ -123,7 +125,10 @@ class TelegraphClient:
             return self._token
 
         account = await self._call(
-            "createAccount", short_name="newsaggrobot", author_name=AUTHOR_NAME,
+            "createAccount",
+            short_name=self._author_name[:32],
+            author_name=self._author_name,
+            author_url=self._author_url,
         )
         self._token = account["access_token"]
         self._token_path.write_text(json.dumps({"access_token": self._token}))
@@ -142,7 +147,8 @@ class TelegraphClient:
             "createPage",
             access_token=await self._get_token(),
             title=title[:256],
-            author_name=AUTHOR_NAME,
+            author_name=self._author_name,
+            author_url=self._author_url,
             content=content,
             return_content="false",
         )

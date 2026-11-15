@@ -77,7 +77,26 @@ DIGEST_TIMEZONE=Australia/Sydney
 CLAUDE_MODEL=claude-sonnet-5-5
 # Where data.db and user_session.session live (default: project root; /data in Docker)
 DATA_DIR=
+
+# --- Optional: profile (for a public news channel bot) ---
+# Post scheduled digests to this channel instead of your DMs (bot must be a channel admin)
+DIGEST_CHAT=@your_channel
+# Weekly roundup right after the daily digest on this day (mon..sun, default off)
+WEEKLY_DAY=mon
+# Topic focus: off-topic posts are skipped
+DIGEST_FOCUS="IT professionals: web hosting, MSPs, cloud, cybersecurity"
+# Comma-separated categories ("Other" is always added)
+DIGEST_CATEGORIES=Security,Vulnerabilities,Cloud & Hosting,MSP & Industry,Vendors & Products,Tools
+# Page titles and Telegraph author branding
+DIGEST_TITLE=Daily Digest
+WEEKLY_TITLE=Weekly Roundup
+BRAND_NAME=News Aggregator Bot
+BRAND_URL=https://example.com
 ```
+
+Scheduled digests post a short teaser (top 3 headlines + link) to `DIGEST_CHAT`, or to you if it's unset. `/summary` and `/weekly` always send a preview to you only. Empty results and errors never go to the channel — you get them privately, along with any channels that couldn't be read.
+
+The weekly roundup is built from the **scheduled** daily digests of the past week (stored in the DB for 30 days), merging stories across days and carrying over their sources and fact-checks — no extra web searches. The first roundup covers only the days since this feature was deployed.
 
 ## Running Locally
 
@@ -140,6 +159,34 @@ Update to a new version:
 git pull && docker compose up -d --build
 ```
 
+### Multiple bots (one per audience)
+
+`compose.yaml` runs one container per bot from the same image. Each has its own `.env` file and data dir:
+
+| Service | Env file | Data dir | Purpose |
+|---|---|---|---|
+| `bot` | `.env` | `./data` | Personal digest in your DMs |
+| `badrantech` | `.env.badrantech` | `./data-badrantech` | Badran Tech news channel |
+
+Setting up the Badran Tech bot:
+
+1. Create a new bot with @BotFather and a Telegram channel; add the bot to the channel as an **admin** (with "Post messages").
+2. On the server:
+   ```bash
+   cd /opt/stack/telegram-aggregator-bot
+   cp .env .env.badrantech && chmod 600 .env.badrantech
+   # edit .env.badrantech: new BOT_TOKEN, DIGEST_TIME=06:30, DIGEST_CHAT=@<channel>,
+   #   WEEKLY_DAY=mon, DIGEST_FOCUS, DIGEST_CATEGORIES, DIGEST_TITLE, WEEKLY_TITLE,
+   #   BRAND_NAME="Badran Tech", BRAND_URL=https://badran.com.au
+   mkdir -p data-badrantech && chown 1001:1001 data-badrantech && chmod 700 data-badrantech
+   docker compose build
+   docker compose run --rm -it badrantech   # log in to Telegram (phone + code), Ctrl+C after "Bot starting"
+   docker compose up -d
+   ```
+3. Message the new bot: `/add_channel ...` for each source channel, then `/summary` to preview.
+
+Each bot logs in to Telegram separately — **never copy a `user_session.session` between data dirs**: the same session used from two places at once gets revoked. To add another bot, copy the `badrantech` service with a new name, env file and data dir.
+
 ### Deploy key (private repo)
 
 ```bash
@@ -167,7 +214,8 @@ Back up `data/` (contains your Telegram session and Telegraph token — treat as
 | `/add_channel <username>` | Subscribe to a public channel (validated) |
 | `/remove_channel <username>` | Unsubscribe from a channel |
 | `/list_channels` | Show all subscribed channels |
-| `/summary` | Generate a digest of the last 24 hours now |
+| `/summary` | Preview a digest of the last 24 hours (sent to you only) |
+| `/weekly` | Preview the weekly roundup from the past week's daily digests |
 | `/help` | Show available commands |
 
 ## Project Structure
@@ -214,4 +262,4 @@ The bot is running non-interactively without a valid session. Copy `user_session
 
 ### Costs
 
-Each digest is one summarisation call plus one fact-check session (up to 25 web searches). Check usage in the Claude Console.
+Each digest is one summarisation call plus one fact-check session (up to 25 web searches), per bot. A weekly roundup is one extra summarisation call over the stored daily topics (no web searches). Check usage in the Claude Console.

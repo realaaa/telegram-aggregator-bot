@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 from bot.channel_reader import ChannelReader
 from bot.config import Config
 from bot.database import Database
-from bot.digest import DigestService, run_daily_scheduler
+from bot.digest import DigestService, run_scheduler
 from bot.fact_checker import FactChecker
 from bot.handlers import inject, router
 from bot.summarizer import Summarizer
@@ -48,12 +48,19 @@ async def main() -> None:
 
     # AI components (share one Anthropic client)
     claude = anthropic.AsyncAnthropic(api_key=config.anthropic_api_key)
-    telegraph = TelegraphClient(config.data_dir)
+    telegraph = TelegraphClient(
+        config.data_dir, author_name=config.brand_name, author_url=config.brand_url,
+    )
     digest = DigestService(
         config=config,
         db=db,
         reader=reader,
-        summarizer=Summarizer(claude, model=config.claude_model),
+        summarizer=Summarizer(
+            claude,
+            model=config.claude_model,
+            focus=config.digest_focus,
+            categories=config.digest_categories,
+        ),
         fact_checker=FactChecker(claude, model=config.claude_model),
         telegraph=telegraph,
     )
@@ -65,9 +72,12 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
 
-    scheduler = asyncio.create_task(run_daily_scheduler(bot, digest, config))
+    scheduler = asyncio.create_task(run_scheduler(bot, digest, config))
 
-    logger.info("Bot starting (model=%s)", config.claude_model)
+    logger.info(
+        "Bot starting (model=%s, brand=%s, digest_chat=%s)",
+        config.claude_model, config.brand_name, config.digest_chat or "owner DMs",
+    )
     try:
         await dp.start_polling(bot)
     finally:

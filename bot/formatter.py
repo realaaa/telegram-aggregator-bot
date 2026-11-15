@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from html import escape
 
 from bot.summarizer import Topic
@@ -111,18 +110,22 @@ def _split_section(section: str, limit: int) -> list[str]:
 
 
 def format_report(
-    topics: list[Topic], hours: int, now: datetime | None = None,
+    topics: list[Topic], title: str, period: str, overview: str | None = None,
 ) -> list[str]:
-    """Format topics into one or more Telegram HTML messages (each <= 4096 chars)."""
-    if not topics:
-        return [f"No updates found in the last {hours} hours."]
+    """Format topics into one or more Telegram HTML messages (each <= 4096 chars).
 
-    date_str = (now or datetime.now()).strftime(DATE_FORMAT)
+    `period` is a phrase like "last 24 hours" or "past 7 days".
+    """
+    if not topics:
+        return [f"No updates found ({period})."]
+
     n = len(topics)
     header = (
-        f"<b>📰 Daily Digest — {date_str}</b>\n"
-        f"<i>{n} topic{'s' if n != 1 else ''}, last {hours}h</i>"
+        f"<b>📰 {escape(title)}</b>\n"
+        f"<i>{n} topic{'s' if n != 1 else ''}, {period}</i>"
     )
+    if overview:
+        header += f"\n\n{escape(overview)}"
 
     pieces = [header]
     for topic in topics:

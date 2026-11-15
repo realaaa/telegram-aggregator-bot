@@ -2,6 +2,7 @@
 .env.*
 .venv/
 data/
+data-*/
 data.db
 *.session
 *.session-journal

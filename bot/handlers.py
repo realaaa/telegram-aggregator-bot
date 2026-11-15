@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from html import escape
 
 from aiogram import Router, types
 from aiogram.filters import Command, CommandObject
 
 from bot.channel_reader import ChannelReader
-from bot.config import Config
+from bot.config import WEEKDAYS, Config
 from bot.database import Database
-from bot.digest import DigestBusyError, DigestService, send_report
+from bot.digest import Digest, DigestBusyError, DigestService, ProgressCallback, send_report
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +40,15 @@ def _is_owner(message: types.Message) -> bool:
 
 def _schedule_text(config: Config) -> str:
     if config.digest_time is None:
-        return "Daily digest is off."
-    return (
-        f"Daily digest is sent at {config.digest_time.strftime('%H:%M')} "
+        return "Scheduled digests are off."
+    where = f"posted to {config.digest_chat}" if config.digest_chat else "sent to you"
+    text = (
+        f"Daily digest is {where} at {config.digest_time.strftime('%H:%M')} "
         f"({config.timezone.key})."
     )
+    if config.weekly_day is not None:
+        text += f"\nWeekly roundup follows on {WEEKDAYS[config.weekly_day].title()}s."
+    return text
 
 
 # --- /start ---
@@ -70,7 +75,8 @@ async def cmd_help(message: types.Message) -> None:
     config: Config = _COMPONENTS["config"]
     await message.answer(
         "<b>Available commands:</b>\n\n"
-        f"/summary — Generate a digest of the last {config.summary_hours} hours now\n"
+        f"/summary — Preview a digest of the last {config.summary_hours} hours now\n"
+        "/weekly — Preview the weekly roundup from this week's daily digests\n"
         "/add_channel &lt;username&gt; — Subscribe to a public channel\n"
         "/remove_channel &lt;username&gt; — Unsubscribe from a channel\n"
         "/list_channels — Show all subscribed channels\n"
@@ -144,17 +150,13 @@ async def cmd_list_channels(message: types.Message) -> None:
     )
 
 
-# --- /summary ---
+# --- /summary, /weekly ---
 
-@router.message(Command("summary"))
-async def cmd_summary(message: types.Message) -> None:
-    if not _is_owner(message):
-        return
-
+async def _run_preview(
+    message: types.Message, build: Callable[[ProgressCallback], Awaitable[Digest]],
+) -> None:
+    """Build a digest with live progress and send it to the owner (never the channel)."""
     digest: DigestService = _COMPONENTS["digest"]
-    if not await digest.has_channels():
-        await message.answer("No channels subscribed. Use /add_channel first.")
-        return
     if digest.busy:
         await message.answer("A digest is already being generated — hang tight.")
         return
@@ -165,7 +167,7 @@ async def cmd_summary(message: types.Message) -> None:
         await status_msg.edit_text(text)
 
     try:
-        result = await digest.build(progress)
+        result = await build(progress)
     except DigestBusyError:
         await status_msg.edit_text("A digest is already being generated — hang tight.")
         return
@@ -178,3 +180,24 @@ async def cmd_summary(message: types.Message) -> None:
 
     await status_msg.delete()
     await send_report(message.bot, message.chat.id, result)
+
+
+@router.message(Command("summary"))
+async def cmd_summary(message: types.Message) -> None:
+    if not _is_owner(message):
+        return
+
+    digest: DigestService = _COMPONENTS["digest"]
+    if not await digest.has_channels():
+        await message.answer("No channels subscribed. Use /add_channel first.")
+        return
+    await _run_preview(message, digest.build)
+
+
+@router.message(Command("weekly"))
+async def cmd_weekly(message: types.Message) -> None:
+    if not _is_owner(message):
+        return
+
+    digest: DigestService = _COMPONENTS["digest"]
+    await _run_preview(message, digest.build_weekly)

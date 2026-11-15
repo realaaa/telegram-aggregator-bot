@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS messages (
     media_caption   TEXT,
     UNIQUE(channel_username, telegram_msg_id)
 );
+
+-- Scheduled daily digests (topics as JSON), source for the weekly roundup
+CREATE TABLE IF NOT EXISTS digests (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT    NOT NULL,
+    topics      TEXT    NOT NULL
+);
 """
 
 
@@ -119,6 +126,31 @@ class Database:
     async def delete_messages_before(self, before: datetime) -> int:
         cursor = await self._db.execute(
             "DELETE FROM messages WHERE date < ?", (before.isoformat(),)
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
+    # -- digests --
+
+    async def save_digest(self, created_at: datetime, topics_json: str) -> None:
+        await self._db.execute(
+            "INSERT INTO digests (created_at, topics) VALUES (?, ?)",
+            (created_at.isoformat(), topics_json),
+        )
+        await self._db.commit()
+
+    async def get_digests_since(self, since: datetime) -> list[tuple[datetime, str]]:
+        """Return [(created_at, topics_json)] with created_at >= since, oldest first."""
+        cursor = await self._db.execute(
+            "SELECT created_at, topics FROM digests WHERE created_at >= ? ORDER BY created_at",
+            (since.isoformat(),),
+        )
+        rows = await cursor.fetchall()
+        return [(datetime.fromisoformat(row["created_at"]), row["topics"]) for row in rows]
+
+    async def delete_digests_before(self, before: datetime) -> int:
+        cursor = await self._db.execute(
+            "DELETE FROM digests WHERE created_at < ?", (before.isoformat(),)
         )
         await self._db.commit()
         return cursor.rowcount

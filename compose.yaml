@@ -1,16 +1,31 @@
+# One image, one container per bot. Each bot has its own .env file (token,
+# channel focus, destination) and its own data dir (DB, Telethon session,
+# Telegraph account). Add more bots by copying the badrantech service.
+x-bot: &bot
+  build: .
+  image: telegram-aggregator-bot
+  restart: unless-stopped
+  environment:
+    DATA_DIR: /data
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
+  # Personal digest, sent to the owner's DMs
   bot:
-    build: .
-    image: telegram-aggregator-bot
+    <<: *bot
     container_name: telegram-aggregator-bot
-    restart: unless-stopped
     env_file: .env
-    environment:
-      DATA_DIR: /data
     volumes:
       - ./data:/data
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+
+  # Badran Tech news channel (IT / hosting / MSP / cybersecurity)
+  badrantech:
+    <<: *bot
+    container_name: badrantech-news-bot
+    env_file: .env.badrantech
+    volumes:
+      - ./data-badrantech:/data
